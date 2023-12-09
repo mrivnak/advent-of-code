@@ -1,3 +1,4 @@
+import os
 import subprocess
 
 from termcolor import colored
@@ -12,12 +13,12 @@ days = {
     "day-04-1": "21088",
     "day-04-2": "6874754",
     "day-05-1": "178159714",
-#    "day-05-2": "100165128", # Rust rover crashes when this runs
+    "day-05-2": "100165128",
 }
 
 
 def test(name: str, expected: str) -> bool:
-    result = subprocess.run(["cargo", "run", "--bin", name, "--release", "--quiet"], capture_output=True)
+    result = subprocess.run(["cargo", "run", "--bin", name, "--release", "--quiet"], capture_output=True, env=os.environ.copy())
     return result.stdout.decode("utf-8").strip() == expected
 
 
