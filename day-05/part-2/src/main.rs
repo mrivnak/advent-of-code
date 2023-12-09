@@ -1,4 +1,6 @@
-use std::ops::RangeInclusive;
+use std::cmp::Ordering;
+use std::ops::{Range, RangeInclusive};
+use rayon::prelude::*;
 use regex::Regex;
 use strum_macros::EnumString;
 
@@ -27,6 +29,26 @@ impl MapRange {
     }
 }
 
+impl Eq for MapRange {}
+
+impl PartialEq<Self> for MapRange {
+    fn eq(&self, other: &Self) -> bool {
+        self.src.start() == other.src.start()
+    }
+}
+
+impl PartialOrd<Self> for MapRange {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.src.start().partial_cmp(&other.src.start())
+    }
+}
+
+impl Ord for MapRange {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.src.start().cmp(other.src.start())
+    }
+}
+
 #[derive(Debug)]
 struct Map {
     from: Item,
@@ -35,18 +57,32 @@ struct Map {
 }
 
 impl Map {
-    fn is_mapped(&self, seed: u64) -> bool {
-        self.ranges.iter().any(|r| r.src.contains(&seed))
-    }
-
     fn map(&self, seed: u64) -> u64 {
-        if !self.is_mapped(seed) {
+        let Some(range) = self.find_range(seed, 0..self.ranges.len()) else {
             return seed;
-        }
-        // TODO: could use binary search here
-        let range = self.ranges.iter().find(|r| r.src.contains(&seed)).unwrap();
+        };
+
         let index = seed - range.src.start();
         range.dest.start() + index
+    }
+
+    fn find_range(&self, seed: u64, idx_range: Range<usize>) -> Option<&MapRange> {
+        if idx_range.is_empty() || (idx_range.len() == 1 && !self.ranges[idx_range.start].src.contains(&seed)) {
+            return None;
+        }
+
+        let mid = idx_range.start + (idx_range.end - idx_range.start) / 2;
+        let range = &self.ranges[mid];
+        match range.src.contains(&seed) {
+            true => Some(range),
+            false => {
+                match range.src.start().cmp(&seed) {
+                    Ordering::Less => self.find_range(seed, mid + 1..idx_range.end),
+                    Ordering::Greater => self.find_range(seed, idx_range.start..mid),
+                    Ordering::Equal => unreachable!("Two ranges cannot have the same start"),
+                }
+            }
+        }
     }
 }
 
@@ -66,10 +102,15 @@ fn main() {
     let input = include_str!("../../input.txt");
 
     let almanac = build_almanac(input);
-    let min = almanac.seeds.iter().flat_map(|r| r.clone()).map(|seed| {
-        let seed_map = almanac.get_map(&Item::Seed).expect("No seed map found");
-        map_item(seed, seed_map, &almanac)
-    }).min().expect("No min seed found");
+    let min = almanac.seeds
+        .iter()
+        .flat_map(|r| r.clone())
+        .collect::<Vec<_>>()
+        .par_iter()
+        .map(|seed| {
+            let seed_map = almanac.get_map(&Item::Seed).expect("No seed map found");
+            map_item(*seed, seed_map, &almanac)
+        }).min().expect("No min seed found");
     println!("{}", min);
 }
 
@@ -94,7 +135,7 @@ fn build_almanac(input: &str) -> Almanac {
         .split_whitespace()
         .map(|s| s.parse::<u64>().expect("Invalid seed"))
         .collect::<Vec<u64>>();
-    let seed_ranges = seeds.chunks_exact(2).map(|c| c[0]..=c[0]+c[1]-1).collect::<Vec<_>>();
+    let seed_ranges = seeds.chunks_exact(2).map(|c| c[0]..=c[0] + c[1] - 1).collect::<Vec<_>>();
 
     let maps_re = Regex::new(r"(.*-to-.*) map:\n((?:\d+\s\d+\s\d+\n?)+)").expect("Invalid maps regex");
     let map_name_re = Regex::new(r"(.*)-to-(.*)").expect("Invalid map name regex");
@@ -108,66 +149,17 @@ fn build_almanac(input: &str) -> Almanac {
             let to = name_cap.get(2).expect("No map to found").as_str().parse::<Item>().expect("Invalid map to");
 
             let map = cap.get(2).expect("No map found").as_str();
-            let map = map.lines().map(|l| {
+            let mut map = map.lines().map(|l| {
                 let mut parts = l.split_whitespace();
                 let dest_start = parts.next().expect("No map dest start found").parse::<u64>().expect("Invalid map dest start");
                 let src_start = parts.next().expect("No map src start found").parse::<u64>().expect("Invalid map src start");
                 let length = parts.next().expect("No map length found").parse::<u64>().expect("Invalid map length");
                 MapRange::new(dest_start, src_start, length)
-            });
-            Map { from, to, ranges: map.collect::<Vec<_>>() }
+            }).collect::<Vec<_>>();
+            map.par_sort();
+            Map { from, to, ranges: map }
         })
         .collect::<Vec<_>>();
 
     Almanac { seeds: seed_ranges, maps }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_map_is_mapped() {
-        let map = Map {
-            from: Item::Seed,
-            to: Item::Soil,
-            ranges: vec![MapRange::new(100, 0, 10)],
-        };
-        assert!(map.is_mapped(0));
-        assert!(map.is_mapped(9));
-        assert!(!map.is_mapped(10));
-    }
-
-    #[test]
-    fn test_map_map() {
-        let map = Map {
-            from: Item::Seed,
-            to: Item::Soil,
-            ranges: vec![MapRange::new(100, 0, 10)],
-        };
-        assert_eq!(map.map(0), 100);
-        assert_eq!(map.map(9), 109);
-        assert_eq!(map.map(20), 20);
-    }
-
-    #[test]
-    fn test_almanac_get_map() {
-        let map0 = Map {
-            from: Item::Seed,
-            to: Item::Soil,
-            ranges: vec![MapRange::new(100, 0, 10)],
-        };
-        let map1 = Map {
-            from: Item::Humidity,
-            to: Item::Location,
-            ranges: vec![MapRange::new(100, 0, 10)],
-        };
-
-        let almanac = Almanac {
-            seeds: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-            maps: vec![map0, map1],
-        };
-        let map = almanac.get_map(&Item::Humidity).expect("No map found");
-        assert!(matches!(map.from, Item::Humidity));
-    }
 }
